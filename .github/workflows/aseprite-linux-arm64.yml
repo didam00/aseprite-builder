@@ -53,6 +53,8 @@ jobs:
           CXX: clang++
         run: |
           export PATH="$GITHUB_WORKSPACE/depot_tools:$PATH"
+          # depot_tools wrappers need their Python/CIPD bootstrap before use.
+          "$GITHUB_WORKSPACE/depot_tools/ensure_bootstrap"
           cd skia
           python3 tools/git-sync-deps
           python3 bin/fetch-ninja
