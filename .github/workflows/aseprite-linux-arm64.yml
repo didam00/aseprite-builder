@@ -1,0 +1,94 @@
+name: Build Aseprite Linux ARM64
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/aseprite-linux-arm64.yml'
+  schedule:
+    - cron: '0 3 * * 0'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+    env:
+      SKIA_BRANCH: aseprite-m124
+    steps:
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git python3 clang g++ cmake ninja-build \
+            zip unzip pkg-config libx11-dev libxcursor-dev libxi-dev \
+            libxrandr-dev libgl1-mesa-dev libfontconfig1-dev \
+            libfreetype6-dev libharfbuzz-dev libpixman-1-dev \
+            libssl-dev zlib1g-dev
+
+      - name: Resolve latest Aseprite release
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/aseprite/aseprite/releases/latest \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Get Aseprite source and dependencies
+        run: |
+          git clone --depth 1 --branch '${{ steps.version.outputs.tag }}' \
+            https://github.com/aseprite/aseprite.git aseprite
+          git -C aseprite submodule update --init --recursive --depth 1
+          git clone --depth 1 --branch "$SKIA_BRANCH" \
+            https://github.com/aseprite/skia.git skia
+          git clone --depth 1 \
+            https://chromium.googlesource.com/chromium/tools/depot_tools.git depot_tools
+
+      - name: Build Skia for Linux ARM64
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          export PATH="$GITHUB_WORKSPACE/depot_tools:$PATH"
+          cd skia
+          python3 tools/git-sync-deps
+          python3 bin/fetch-ninja
+          gn gen out/Release-arm64 --args='is_debug=false is_official_build=true target_cpu="arm64" skia_use_system_expat=false skia_use_system_icu=false skia_use_system_libjpeg_turbo=false skia_use_system_libpng=false skia_use_system_libwebp=false skia_use_system_zlib=false skia_use_freetype=true skia_use_harfbuzz=true skia_pdf_subset_harfbuzz=true skia_use_system_freetype2=false skia_use_system_harfbuzz=false'
+          ninja -C out/Release-arm64 skia modules
+          test -f out/Release-arm64/libskia.a
+
+      - name: Build Aseprite for Linux ARM64
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          cmake -S aseprite -B aseprite/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS=-stdlib=libstdc++ \
+            -DCMAKE_EXE_LINKER_FLAGS=-stdlib=libstdc++ \
+            -DENABLE_TESTS=OFF \
+            -DLAF_BACKEND=skia \
+            -DSKIA_DIR="$GITHUB_WORKSPACE/skia" \
+            -DSKIA_LIBRARY_DIR="$GITHUB_WORKSPACE/skia/out/Release-arm64" \
+            -DSKIA_LIBRARY="$GITHUB_WORKSPACE/skia/out/Release-arm64/libskia.a"
+          cmake --build aseprite/build --target aseprite --parallel 4
+
+      - name: Verify ARM64 executable and package
+        run: |
+          file aseprite/build/bin/aseprite
+          file aseprite/build/bin/aseprite | grep -Eq 'ARM aarch64|ARM64'
+          aseprite/build/bin/aseprite --version
+          mkdir -p dist
+          cd aseprite/build/bin
+          zip -r "$GITHUB_WORKSPACE/dist/Aseprite-${{ steps.version.outputs.tag }}-Linux-arm64.zip" aseprite data
+
+      - name: Save private build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Aseprite-${{ steps.version.outputs.tag }}-Linux-arm64
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 7
